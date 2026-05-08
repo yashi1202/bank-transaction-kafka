@@ -1,0 +1,15 @@
+package com.bank.repository;
+
+import com.bank.entity.Transaction;
+import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.stereotype.Repository;
+
+import java.util.List;
+import java.util.UUID;
+
+@Repository
+public interface TransactionRepository extends JpaRepository<Transaction, UUID> {
+    List<Transaction> findByFromAccountIdOrToAccountIdOrderByCreatedAtDesc(
+            String fromAccountId, String toAccountId);
+    List<Transaction> findByStatus(Transaction.TransactionStatus status);
+}

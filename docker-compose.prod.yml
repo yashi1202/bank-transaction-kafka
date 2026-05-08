@@ -1,0 +1,118 @@
+version: '3.8'
+# production docker-compose
+# used by deployment server, not for local dev
+
+services:
+  app:
+    image: ${DOCKER_USERNAME}/bank-transaction-kafka:${IMAGE_TAG}
+    # image pulled from DockerHub
+    # ${DOCKER_USERNAME} = your DockerHub username (from env variable)
+    # ${IMAGE_TAG} = git commit SHA or "latest" (from env variable)
+    # using commit SHA instead of "latest" = immutable deployments
+    # you always know exactly which code is running
+
+    container_name: bank-app
+    ports:
+      - "8080:8080"
+      # host_port:container_port
+      # requests to host:8080 → forwarded to container:8080
+
+    environment:
+      # override application.yml values at runtime
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/bankdb
+      # "postgres" = service name in this docker-compose
+      # Docker DNS resolves service names to container IPs
+
+      SPRING_DATASOURCE_USERNAME: ${DB_USERNAME}
+      SPRING_DATASOURCE_PASSWORD: ${DB_PASSWORD}
+      # ${DB_USERNAME} read from .env file or environment
+      # NEVER hardcode passwords in config files
+
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      # internal Docker network address for Kafka
+
+      TWILIO_ACCOUNT_SID: ${TWILIO_ACCOUNT_SID}
+      TWILIO_AUTH_TOKEN: ${TWILIO_AUTH_TOKEN}
+      TWILIO_FROM_NUMBER: ${TWILIO_FROM_NUMBER}
+
+    depends_on:
+      kafka:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      # app starts ONLY after kafka and postgres are healthy
+      # prevents startup errors from "connection refused"
+
+    restart: unless-stopped
+    # restart policy:
+    # unless-stopped = restart if crashes, but not if manually stopped
+    # always = always restart even if manually stopped
+    # on-failure = only restart on non-zero exit codes
+
+    networks:
+      - bank-network
+
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    container_name: zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    networks:
+      - bank-network
+    restart: unless-stopped
+
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: kafka
+    depends_on:
+      - zookeeper
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENERS: INTERNAL://0.0.0.0:29092,EXTERNAL://0.0.0.0:9092
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:29092,EXTERNAL://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    healthcheck:
+      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+    networks:
+      - bank-network
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:15
+    container_name: postgres
+    environment:
+      POSTGRES_DB: bankdb
+      POSTGRES_USER: ${DB_USERNAME}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # named volume = data persists across container restarts
+      # without this, all data lost on container restart
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USERNAME} -d bankdb"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - bank-network
+    restart: unless-stopped
+
+networks:
+  bank-network:
+    driver: bridge
+    # bridge network = private network between containers
+    # containers can talk to each other by service name
+    # isolated from other Docker networks
+
+volumes:
+  pgdata:
+    # named volume managed by Docker
+    # data stored in /var/lib/docker/volumes/

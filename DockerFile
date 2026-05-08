@@ -1,0 +1,92 @@
+# ─── STAGE 1: BUILD ───────────────────────────────────────────────
+FROM maven:3.9.6-eclipse-temurin-17 AS builder
+# FROM = base image to start from
+# maven:3.9.6-eclipse-temurin-17 = image that has:
+#   - Maven 3.9.6 (to build the project)
+#   - Java 17 (temurin = Eclipse's OpenJDK distribution)
+# AS builder = name this stage "builder"
+#   used in multi-stage builds to copy artifacts between stages
+
+WORKDIR /app
+# WORKDIR = set working directory inside container
+# like doing "cd /app" inside the container
+# all subsequent commands run from /app
+
+COPY pom.xml .
+# COPY <source on host> <destination in container>
+# copy pom.xml first (before source code)
+# WHY? Docker layer caching optimization:
+#   if pom.xml hasn't changed → skip dependency download
+#   saves minutes on every build
+
+RUN mvn dependency:go-offline -B
+# RUN = execute command inside container during build
+# dependency:go-offline = download ALL dependencies to local cache
+# -B = batch mode (no interactive prompts, cleaner logs)
+# this layer is cached if pom.xml hasn't changed
+
+COPY src ./src
+# now copy source code
+# done AFTER dependency download for caching efficiency
+# changing source code won't re-download dependencies
+
+RUN mvn clean package -DskipTests -B
+# clean = delete target/ folder
+# package = compile + run tests + create JAR
+# -DskipTests = skip tests here (tests run separately in pipeline)
+# -B = batch mode
+# produces: target/bank-transaction-kafka-1.0.0.jar
+
+# ─── STAGE 2: RUNTIME ─────────────────────────────────────────────
+FROM eclipse-temurin:17-jre-alpine
+# NEW FROM = start fresh with a different base image
+# eclipse-temurin:17-jre = Java 17 JRE only (not full JDK)
+# alpine = minimal Linux (~5MB vs ~200MB for full Ubuntu)
+# JRE = Java Runtime Environment (run only, no compiler)
+# WHY smaller image?
+#   - faster to download/deploy
+#   - smaller attack surface (security)
+#   - less disk space
+# Final image size: ~150MB vs ~500MB with JDK
+
+WORKDIR /app
+# set working directory in runtime container
+
+RUN addgroup -S bankapp && adduser -S bankapp -G bankapp
+# create a non-root user and group called "bankapp"
+# WHY? Security best practice:
+#   running as root = if app is hacked, attacker has root access
+#   running as non-root = limited damage if compromised
+
+COPY --from=builder /app/target/*.jar app.jar
+# COPY --from=builder = copy from the "builder" stage
+# /app/target/*.jar = the built JAR file
+# app.jar = rename it to app.jar in runtime container
+# only the JAR is copied — not Maven, not source code
+# this is why multi-stage builds keep images small
+
+RUN chown bankapp:bankapp app.jar
+# chown = change ownership of app.jar to bankapp user
+# ensures non-root user can read the file
+
+USER bankapp
+# switch to non-root user for running the app
+# all subsequent RUN/CMD commands run as this user
+
+EXPOSE 8080
+# EXPOSE = document that container listens on port 8080
+# does NOT actually publish the port (that's done in docker run)
+# informational — tells developers/tools which port to map
+
+ENTRYPOINT ["java", \
+  "-XX:+UseContainerSupport", \
+  "-XX:MaxRAMPercentage=75.0", \
+  "-jar", \
+  "app.jar"]
+# ENTRYPOINT = command that runs when container starts
+# java = run Java
+# -XX:+UseContainerSupport = JVM reads container memory limits
+#   without this, JVM reads host RAM and over-allocates
+# -XX:MaxRAMPercentage=75.0 = use max 75% of container memory
+#   prevents OutOfMemoryError
+# -jar app.jar = run our Spring Boot JAR

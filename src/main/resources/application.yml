@@ -41,7 +41,7 @@ kafka:
     dead-letter: transaction-dlt
     
 twilio:
-  
+  enabled: false
   accountSid: ${TWILIO_ACCOUNT_SID}
   authToken: ${TWILIO_AUTH_TOKEN}      # from twilio.com/console
   from-number: "+1234567890"   

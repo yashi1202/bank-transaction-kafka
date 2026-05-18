@@ -59,10 +59,7 @@ public class NotificationConsumer {
             log.warn("⚠️ No phone number for accountId={}, skipping SMS", event.getAccountId());
             return;
         }
-        if (((CharSequence) smsService).isEmpty()) {
-            log.warn("⚠️ SMS service not enabled, skipping SMS notification");
-            return;
-        }
+       
 
         String smsMessage = buildSmsMessage(event);
         smsService.sendSms(event.getPhoneNumber(), smsMessage);

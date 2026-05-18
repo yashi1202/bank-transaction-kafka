@@ -1,136 +1,77 @@
 name: Bank Transaction Kafka CI/CD
-# name = displayed in GitHub Actions UI
-# shown in pull requests and Actions tab
 
 on:
-  # TRIGGERS — when does this pipeline run?
   push:
     branches:
       - main
       - develop
-    # trigger on push to main or develop branch
-    # main = production deployments
-    # develop = staging/testing deployments
-
   pull_request:
     branches:
       - main
-    # trigger on pull requests targeting main
-    # runs CI checks before code is merged
-    # prevents broken code from reaching main
-
   workflow_dispatch:
-    # allows manual trigger from GitHub UI
-    # useful for emergency deployments
-    # or re-running a failed deployment
 
 env:
-  # global environment variables available to all jobs
   DOCKER_IMAGE: ${{ secrets.DOCKER_USERNAME }}/bank-transaction-kafka
-  # ${{ secrets.DOCKER_USERNAME }} = reads from GitHub Secrets
-  # GitHub Secrets = encrypted storage for sensitive values
-  # NEVER put actual values here in the yaml file
-
   JAVA_VERSION: '17'
   MAVEN_OPTS: '-Xmx1024m'
-  # MAVEN_OPTS = JVM options for Maven itself
-  # -Xmx1024m = Maven can use up to 1GB RAM
-  # prevents OutOfMemoryError during compilation
 
-# ─── JOBS ─────────────────────────────────────────────────────────
 jobs:
-
-# ══════════════════════════════════════════════════════════════════
-# JOB 1: TEST
-# Runs on every push and pull request
-# ══════════════════════════════════════════════════════════════════
   test:
     name: 🧪 Run Tests
     runs-on: ubuntu-latest
-    # runs-on = type of server (runner) to use
-    # ubuntu-latest = GitHub provides free Ubuntu VM
-    # each job gets a fresh VM — no leftover state
+    
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_DB: testdb
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
 
     steps:
-    # steps = ordered list of tasks in this job
-    # each step runs sequentially
-
       - name: 📥 Checkout Code
         uses: actions/checkout@v4
-        # uses = reference a pre-built action
-        # actions/checkout = GitHub's official action
-        # clones your repository into the runner VM
-        # without this, runner has no code to work with
 
       - name: ☕ Set Up Java 17
         uses: actions/setup-java@v4
         with:
           java-version: ${{ env.JAVA_VERSION }}
-          # reads JAVA_VERSION from env section above
           distribution: 'temurin'
-          # temurin = Eclipse's OpenJDK (free, production-grade)
-          # alternatives: corretto (Amazon), zulu, microsoft
           cache: 'maven'
-          # cache = save Maven dependencies between runs
-          # first run: downloads all deps (~2-3 mins)
-          # subsequent runs: uses cache (~20-30 secs)
-          # cache key based on pom.xml hash
-          # if pom.xml changes → cache invalidated → re-download
 
-      - name: 🔧 Build with Maven (skip tests for speed check)
+      - name: 🔧 Build with Maven
         run: mvn clean compile -B
-        # run = execute shell command on the runner
-        # clean = delete previous build artifacts
-        # compile = just compile, don't package
-        # -B = batch mode (no color, no progress bars — cleaner logs)
-        # WHY separate compile step?
-        #   catches compilation errors fast before running tests
 
       - name: 🧪 Run Unit Tests
         run: mvn test -B
-        # mvn test = compile + run all tests in src/test/
-        # if any test fails → exit code non-zero → job fails
-        # GitHub marks the commit as failed
+        env:
+          SPRING_DATASOURCE_URL: jdbc:postgresql://localhost:5432/testdb
+          SPRING_DATASOURCE_USERNAME: postgres
+          SPRING_DATASOURCE_PASSWORD: postgres
 
       - name: 📊 Upload Test Results
         uses: actions/upload-artifact@v4
         if: always()
-        # if: always() = run this step even if previous step failed
-        # important: upload test results even when tests fail
-        # so you can see WHICH tests failed
         with:
           name: test-results
           path: target/surefire-reports/
-          # surefire-reports = Maven's test result XML files
-          # uploaded as artifact to GitHub
-          # downloadable from Actions UI for inspection
           retention-days: 7
-          # keep artifacts for 7 days then auto-delete
 
-# ══════════════════════════════════════════════════════════════════
-# JOB 2: BUILD & PUSH DOCKER IMAGE
-# Runs only on push to main (not on pull requests)
-# ══════════════════════════════════════════════════════════════════
   build-and-push:
     name: 🐳 Build & Push Docker Image
     runs-on: ubuntu-latest
     needs: test
-    # needs = this job waits for "test" job to succeed
-    # if tests fail → this job is skipped
-    # dependency chain: test → build-and-push → deploy
-
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-    # if condition = only run when:
-    # github.ref = the branch that triggered the workflow
-    # refs/heads/main = we're on the main branch
-    # github.event_name == 'push' = it's a push (not PR)
-    # WHY? Don't push Docker images for pull requests
-    #   PRs are for review — only merged code gets deployed
 
     outputs:
       image-tag: ${{ steps.meta.outputs.version }}
-      # outputs = pass data between jobs
-      # image-tag from this job used by deploy job
 
     steps:
       - name: 📥 Checkout Code
@@ -138,179 +79,40 @@ jobs:
 
       - name: 🏷️ Generate Image Metadata
         id: meta
-        # id = give this step a name to reference its outputs
         uses: docker/metadata-action@v5
-        # metadata-action = generates Docker tags and labels
         with:
           images: ${{ env.DOCKER_IMAGE }}
           tags: |
             type=sha,prefix=sha-,format=short
             type=raw,value=latest,enable={{is_default_branch}}
-          # type=sha = tag with git commit SHA (e.g. sha-abc1234)
-          # WHY SHA tags? Immutable — you know exactly what's deployed
-          # type=raw,value=latest = also tag as "latest" on main branch
-          # enables: docker pull yourimage:latest (always gets newest)
 
       - name: 🔑 Login to DockerHub
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_TOKEN }}
-          # secrets.DOCKER_USERNAME = your DockerHub username
-          # secrets.DOCKER_TOKEN = DockerHub access token
-          # WHY token instead of password?
-          #   tokens can be scoped (read-only, write, etc.)
-          #   tokens can be revoked without changing password
-          #   GitHub Secrets encrypts them at rest
 
       - name: 🏗️ Set Up Docker Buildx
         uses: docker/setup-buildx-action@v3
-        # Buildx = extended Docker build capabilities
-        # enables:
-        #   - multi-platform builds (amd64, arm64)
-        #   - better layer caching
-        #   - BuildKit optimizations
-        # your Mac uses arm64, servers usually use amd64
-        # Buildx builds for BOTH simultaneously
 
       - name: 🐳 Build and Push Docker Image
         uses: docker/build-push-action@v5
         with:
           context: .
-          # context = build context (folder with Dockerfile)
-          # "." = current directory (project root)
-
           push: true
-          # push = after building, push to DockerHub
-          # push: false = build only (useful for testing)
-
           tags: ${{ steps.meta.outputs.tags }}
-          # tags from metadata-action step above
-          # e.g.: yourname/bank-kafka:sha-abc1234
-          #       yourname/bank-kafka:latest
-
           labels: ${{ steps.meta.outputs.labels }}
-          # labels = metadata embedded in Docker image
-          # includes: git commit, build date, repo URL
-
           platforms: linux/amd64,linux/arm64
-          # build for both Intel (amd64) and Apple Silicon (arm64)
-          # amd64 = AWS EC2, most cloud servers
-          # arm64 = Mac M1/M2, AWS Graviton (cheaper)
-
           cache-from: type=gha
           cache-to: type=gha,mode=max
-          # gha = GitHub Actions cache
-          # cache Docker layers between workflow runs
-          # only changed layers are rebuilt
-          # dramatically speeds up subsequent builds
 
-# ══════════════════════════════════════════════════════════════════
-# JOB 3: DEPLOY
-# Pulls new image and restarts containers
-# ══════════════════════════════════════════════════════════════════
-  #deploy:
-   # name: 🚀 Deploy to Server
-    #runs-on: ubuntu-latest
-    #needs: build-and-push
-    # waits for Docker image to be pushed before deploying
-
-    #if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-
-    #steps:
-     # - name: 📥 Checkout Code
-       # uses: actions/checkout@v4
-
-      #- name: 🚀 Deploy via Docker Compose
-       # uses: appleboy/ssh-action@v1.0.3
-        # ssh-action = connects to your server via SSH
-        # runs commands remotely on your deployment server
-       # with:
-         # host: ${{ secrets.SERVER_HOST }}
-          # SERVER_HOST = IP address of your server
-          # e.g. 192.168.1.100 or ec2-xx-xx-xx.amazonaws.com
-
-         # username: ${{ secrets.SERVER_USERNAME }}
-          # SERVER_USERNAME = SSH login user
-          # e.g. ubuntu, ec2-user, root
-
-        #  key: ${{ secrets.SERVER_SSH_KEY }}
-          # SERVER_SSH_KEY = private SSH key content
-          # corresponding public key must be on server
-          # in ~/.ssh/authorized_keys
-
-          #script: |
-            # everything here runs on YOUR SERVER
-
-           # cd /opt/bank-transaction-kafka
-            # navigate to app directory on server
-
-           # export DOCKER_USERNAME=${{ secrets.DOCKER_USERNAME }}
-           # export IMAGE_TAG=sha-$(echo ${{ github.sha }} | cut -c1-7)
-            # IMAGE_TAG = first 7 chars of git commit SHA
-            # e.g. sha-abc1234
-            # matches the tag we pushed to DockerHub
-
-           # export DB_USERNAME=${{ secrets.DB_USERNAME }}
-           # export DB_PASSWORD=${{ secrets.DB_PASSWORD }}
-           # export TWILIO_ACCOUNT_SID=${{ secrets.TWILIO_ACCOUNT_SID }}
-           # export TWILIO_AUTH_TOKEN=${{ secrets.TWILIO_AUTH_TOKEN }}
-           # export TWILIO_FROM_NUMBER=${{ secrets.TWILIO_FROM_NUMBER }}
-            # inject secrets as environment variables
-            # docker-compose.prod.yml reads these with ${VAR}
-
-           # docker compose -f docker-compose.prod.yml pull app
-            # pull = download new image from DockerHub
-            # only downloads changed layers (efficient)
-
-           # docker compose -f docker-compose.prod.yml up -d --no-deps app
-            # up -d = start in detached (background) mode
-            # --no-deps = don't restart kafka/postgres/zookeeper
-            #   only restart the app container
-            # this gives zero-downtime-ish deployment
-
-           # docker image prune -f
-            # prune = delete old unused Docker images
-            # -f = force (no confirmation prompt)
-            # frees up disk space on server
-
-     # - name: ✅ Health Check
-       # run: |
-         # sleep 30
-          # wait 30 seconds for app to fully start
-          # Spring Boot takes ~15-20 seconds to start
-
-         # curl --fail http://${{ secrets.SERVER_HOST }}:8080/actuator/health
-          # curl --fail = exit with error if HTTP status >= 400
-          # /actuator/health = Spring Boot health endpoint
-          # returns {"status":"UP"} if healthy
-          # if this fails → deployment marked as failed
-
-# ══════════════════════════════════════════════════════════════════
-# JOB 4: NOTIFY (Optional)
-# Send Slack/email notification on success or failure
-# ══════════════════════════════════════════════════════════════════
-  #notify:
-    #name: 📢 Notify Team
-   # runs-on: ubuntu-latest
-    #needs: [test, build-and-push, deploy]
-    #if: always()
-    # always() = run even if previous jobs failed
-    # so team gets notified on both success AND failure
-
-    #steps:
-      #- name: ✅ Notify Success
-       # if: needs.deploy.result == 'success'
-       # run: |
-         # echo "✅ Deployment successful!"
-         # echo "Image: ${{ env.DOCKER_IMAGE }}:sha-$(echo ${{ github.sha }} | cut -c1-7)"
-          #echo "Deployed by: ${{ github.actor }}"
-          # github.actor = GitHub username who pushed the code
-
-     # - name: ❌ Notify Failure
-     #   if: needs.deploy.result == 'failure' || needs.test.result == 'failure'
-       # run: |
-         # echo "❌ Pipeline failed!"
-         # echo "Check logs: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          # github.run_id = unique ID of this workflow run
-          # direct link to the failed run's logs
+  # deploy:
+  #   name: 🚀 Deploy to Server
+  #   runs-on: ubuntu-latest
+  #   needs: build-and-push
+  #   if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+  #   steps:
+  #     - name: 📥 Checkout Code
+  #       uses: actions/checkout@v4
+  #     - name: 🚀 Deploy via Docker Compose
+  #       uses: appleboy/ssh-action@v1.0.3

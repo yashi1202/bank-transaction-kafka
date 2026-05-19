@@ -5,6 +5,9 @@ import com.twilio.rest.api.v2010.account.Message;
 import com.twilio.type.PhoneNumber;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+
+import java.util.Optional;
+
 import org.springframework.stereotype.Service;
 
 @Service
@@ -12,13 +15,13 @@ import org.springframework.stereotype.Service;
 @RequiredArgsConstructor
 public class SmsService {
 
-    private final TwilioConfig twilioConfig;
+    private final Optional<TwilioConfig> twilioConfig;
 
     public void sendSms(String toPhoneNumber, String messageBody) {
         try {
             Message message = Message.creator(
                     new PhoneNumber(toPhoneNumber),   // recipient
-                    new PhoneNumber(twilioConfig.getFromNumber()), // sender
+                    new PhoneNumber(twilioConfig.get().getFromNumber()), // sender
                     messageBody
             ).create();
 
